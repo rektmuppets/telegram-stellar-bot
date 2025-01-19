@@ -1,0 +1,33 @@
+{
+  "name": "photon-bot-stellar",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "export": "next export",
+    "start": "serve out",
+    "deploy": "npm run build && npm run export && gh-pages -d out"
+  },
+  "dependencies": {
+    "@reown/appkit": "^1.6.4",
+    "@walletconnect/modal": "^2.7.0",
+    "axios": "^1.7.9",
+    "next": "^15.1.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@types/axios": "^0.9.36",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "^15.1.4",
+    "gh-pages": "^5.0.0",
+    "serve": "^14.2.0",
+    "typescript": "^5"
+  },
+  "homepage": "https://rektmuppets.github.io/photon-bot-frontend"
+}
