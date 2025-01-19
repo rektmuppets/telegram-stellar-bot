@@ -1,0 +1,23 @@
+{
+  "name": "telegram-stellar-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@reown/appkit": "^1.6.4",
+    "@reown/appkit-adapter-ethers": "^1.6.4",
+    "@stellar/stellar-base": "^13.0.1",
+    "@stellar/stellar-sdk": "^13.1.0",
+    "@walletconnect/core": "^2.17.3",
+    "@walletconnect/sign-client": "2.17.3",
+    "@walletconnect/types": "2.17.3",
+    "@walletconnect/utils": "2.17.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "ethers": "^6.13.5",
+    "express": "^4.21.2",
+    "node-fetch": "^2.7.0"
+  }
+}
