@@ -1,3 +1,0 @@
-echo .env > .gitignore
-echo node_modules/ >> .gitignore
-echo bot.log >> .gitignore
