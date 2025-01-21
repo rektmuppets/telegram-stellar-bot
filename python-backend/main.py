@@ -6,6 +6,10 @@ from dotenv import load_dotenv
 import os
 import asyncio
 import logging
+import sys
+
+# Add the parent directory to the Python path for imports
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Load environment variables
 load_dotenv()

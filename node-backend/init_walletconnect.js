@@ -105,7 +105,7 @@ async function connectWallet() {
       requiredNamespaces: {
         stellar: {
           chains: ['stellar:pubnet'],
-          methods: ['stellar_signTransaction'],
+          methods: ['stellar_signAndSubmitXDR', 'stellar_signXDR'],
           events: [],
         },
       },

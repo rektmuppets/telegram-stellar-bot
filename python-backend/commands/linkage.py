@@ -1,8 +1,11 @@
+import os
 import requests
 
+# Load environment variables for API endpoints
+LINK_WALLET_URL = os.getenv("LINK_WALLET_URL", "https://api.photonbot.xyz/link-wallet")
+
 def get_user_wallet(telegram_id):
-    backend_url = "http://localhost:4000/link-wallet"  # Replace with your backend endpoint
-    response = requests.post(backend_url, json={"telegramId": telegram_id})
+    response = requests.post(LINK_WALLET_URL, json={"telegramId": telegram_id})
     
     if response.status_code == 200:
         data = response.json()

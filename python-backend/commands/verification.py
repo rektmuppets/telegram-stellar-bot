@@ -1,3 +1,4 @@
+import os
 import requests
 import base64
 from io import BytesIO
@@ -7,11 +8,14 @@ from aiogram.types import FSInputFile
 
 router = Router()
 
+# Load environment variables for API endpoints
+CONNECT_WALLET_URL = os.getenv("CONNECT_WALLET_URL", "https://api.photonbot.xyz/connect-wallet")
+LINK_WALLET_URL = os.getenv("LINK_WALLET_URL", "https://api.photonbot.xyz/link-wallet")
+
 @router.message(Command("connectwallet"))
 async def connect_wallet(message: types.Message):
     try:
-        server_url = "http://localhost:4000/connect-wallet"
-        response = requests.get(server_url)
+        response = requests.get(CONNECT_WALLET_URL)
 
         if response.status_code == 200:
             qr_code_data = response.json().get("qrCode")
@@ -39,8 +43,7 @@ async def register(message: types.Message):
         wallet_address = "GABCDEF123456789"  # Replace with dynamic value
         session_topic = "mock-session-topic"  # Replace with dynamic value
 
-        server_url = "http://localhost:4000/link-wallet"
-        response = requests.post(server_url, json={
+        response = requests.post(LINK_WALLET_URL, json={
             "telegramID": telegram_id,
             "walletAddress": wallet_address,
             "sessionTopic": session_topic
@@ -53,18 +56,16 @@ async def register(message: types.Message):
     except Exception as e:
         await message.reply(f"⚠️ An error occurred: {str(e)}")
 
+
 @router.message(Command("linkwallet"))
 async def link_wallet(message: types.Message):
     """
     Check if the Telegram ID is linked to a wallet and session topic.
     """
     try:
-        # Node.js endpoint to verify linkage
         telegram_id = message.from_user.username  # Telegram username
-        server_url = f"http://localhost:4000/link-wallet/{telegram_id}"  # Backend endpoint
+        response = requests.get(f"{LINK_WALLET_URL}/{telegram_id}")
 
-        response = requests.get(server_url)
-        
         if response.status_code == 200:
             linked_data = response.json()
             wallet_address = linked_data.get("walletAddress", "N/A")
