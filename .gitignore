@@ -43,3 +43,4 @@ next-env.d.ts
 photon-bot-stellar/.env.local
 photon-bot-stellar/.next/
 photon-bot-stellar/node_modules/
+node-backend/test_session.js

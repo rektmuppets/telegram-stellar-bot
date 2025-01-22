@@ -9,10 +9,9 @@ import dotenv from 'dotenv';
 // Load environment variables
 dotenv.config();
 
-// Ensure essential environment variables are loaded
 const projectId = process.env.PROJECT_ID;
 const reownApiKey = process.env.REOWN_API_KEY;
-const appPort = process.env.PORT || 4000;
+const appPort = process.env.PORT;
 
 if (!projectId) {
   throw new Error("PROJECT_ID is not defined in the environment variables.");
@@ -45,6 +44,21 @@ try {
 } catch (err) {
   console.error('⚠️ Failed to initialize AppKit:', err);
   process.exit(1);
+}
+
+// Initialize SignClient for session management
+let signClient;
+async function initializeSignClient() {
+  try {
+    signClient = await SignClient.init({
+      projectId,
+      metadata,
+    });
+    console.log('✅ WalletConnect SignClient initialized.');
+  } catch (error) {
+    console.error('❌ Failed to initialize SignClient:', error);
+    process.exit(1);
+  }
 }
 
 const app = express();
@@ -88,19 +102,6 @@ app.get('/link-wallet/:telegramID', (req, res) => {
 // Function to connect wallet and generate WalletConnect QR code
 async function connectWallet() {
   try {
-    const signClient = await SignClient.init({
-      projectId,
-      metadata,
-    });
-
-    signClient.on('session_update', (event) => {
-      console.log('Session updated:', JSON.stringify(event, null, 2));
-    });
-
-    signClient.on('session_delete', (event) => {
-      console.log('Session deleted:', JSON.stringify(event, null, 2));
-    });
-
     const session = await signClient.connect({
       requiredNamespaces: {
         stellar: {
@@ -109,6 +110,14 @@ async function connectWallet() {
           events: [],
         },
       },
+    });
+
+    signClient.on('session_update', (event) => {
+      console.log('Session updated:', JSON.stringify(event, null, 2));
+    });
+
+    signClient.on('session_delete', (event) => {
+      console.log('Session deleted:', JSON.stringify(event, null, 2));
     });
 
     const qrCodeData = await QRCode.toDataURL(session.uri);
@@ -129,7 +138,41 @@ app.get('/connect-wallet', async (req, res) => {
   }
 });
 
+// Endpoint to retrieve active sessions
+app.get('/sessions', async (req, res) => {
+  try {
+    if (!signClient) {
+      return res.status(500).json({ error: 'SignClient not initialized.' });
+    }
+
+    const sessions = signClient.session.values;
+    if (!sessions || sessions.length === 0) {
+      return res.status(404).json({ error: 'No active sessions found.' });
+    }
+
+    const formattedSessions = sessions.map((session) => {
+      const { topic, namespaces } = session;
+      const stellarNamespace = namespaces.stellar || {};
+      const accounts = stellarNamespace.accounts || [];
+      const publicKeys = accounts.map((account) => account.split(':')[2]);
+
+      return {
+        topic,
+        namespaces,
+        publicKeys,
+      };
+    });
+
+    res.status(200).json({ sessions: formattedSessions });
+  } catch (error) {
+    console.error('❌ Error retrieving sessions:', error);
+    res.status(500).json({ error: 'Failed to retrieve sessions.' });
+  }
+});
+
 // Start the server
-app.listen(appPort, () => {
-  console.log(`✅ Server running at http://localhost:${appPort}`);
+initializeSignClient().then(() => {
+  app.listen(appPort, () => {
+    console.log(`✅ Server running at http://localhost:${appPort}`);
+  });
 });
