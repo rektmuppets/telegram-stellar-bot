@@ -5,8 +5,7 @@ import TelegramForm from "./TelegramForm";
 const ParentComponent: React.FC = () => {
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [sessionTopic, setSessionTopic] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [isPolling, setIsPolling] = useState<boolean>(true);
 
   useEffect(() => {
     const fetchSessionDetails = async () => {
@@ -14,7 +13,7 @@ const ParentComponent: React.FC = () => {
         const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/sessions`);
         if (!response.ok) {
           if (response.status === 404) {
-            setSessionError("No active sessions found. Please connect your wallet.");
+            console.log("No active sessions found.");
           } else {
             throw new Error("Failed to fetch session details.");
           }
@@ -22,52 +21,35 @@ const ParentComponent: React.FC = () => {
         }
 
         const { sessions } = await response.json();
-        if (!sessions || sessions.length === 0) {
-          setSessionError("No active sessions found. Please connect your wallet.");
-          return;
-        }
+        const [firstSession] = sessions || [];
 
-        const [firstSession] = sessions;
-
-        // Ensure session data has publicKeys and topic
-        if (firstSession && firstSession.publicKeys?.length > 0) {
+        if (firstSession?.publicKeys?.length) {
           setWalletAddress(firstSession.publicKeys[0]); // Stellar wallet address
           setSessionTopic(firstSession.topic); // WalletConnect session topic
-        } else {
-          setSessionError("Session data is incomplete. Please reconnect your wallet.");
+          setIsPolling(false); // Stop polling once a session is found
         }
       } catch (error) {
         console.error("Error fetching session details:", error);
-        setSessionError("An error occurred while retrieving session details.");
-      } finally {
-        setIsLoading(false);
       }
     };
 
-    fetchSessionDetails();
-  }, []);
-
-  const handleWalletConnect = (address: string, topic: string) => {
-    setWalletAddress(address);
-    setSessionTopic(topic);
-    setSessionError(null); // Clear any previous errors
-  };
+    if (isPolling) {
+      const interval = setInterval(fetchSessionDetails, 5000); // Poll every 5 seconds
+      fetchSessionDetails(); // Initial fetch
+      return () => clearInterval(interval); // Cleanup on unmount
+    }
+  }, [isPolling]);
 
   return (
     <div>
       <h1>Connect Wallet and Link Telegram</h1>
-      {isLoading ? (
-        <p>Loading session details...</p>
-      ) : sessionError ? (
-        <div>
-          <p>{sessionError}</p>
-          <WalletConnectButton onConnect={handleWalletConnect} />
-        </div>
-      ) : (
+      {!walletAddress || !sessionTopic ? (
         <>
-          <WalletConnectButton onConnect={handleWalletConnect} />
-          <TelegramForm walletAddress={walletAddress} sessionTopic={sessionTopic} />
+          <p>Please connect your wallet.</p>
+          <WalletConnectButton onConnect={() => setIsPolling(true)} />
         </>
+      ) : (
+        <TelegramForm walletAddress={walletAddress} sessionTopic={sessionTopic} />
       )}
     </div>
   );
