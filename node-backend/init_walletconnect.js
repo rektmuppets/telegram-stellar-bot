@@ -5,6 +5,7 @@ import QRCode from 'qrcode';
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import os from 'os';
 
 // Load environment variables
 dotenv.config();
@@ -28,9 +29,17 @@ console.log(`✅ Loaded PORT: ${appPort}`);
 const metadata = {
   name: 'Photon Bot for Stellar',
   description: 'WalletConnect Example',
-  url: `https://api.photonbot.xyz`, // Update to match your domain
+  url: `https://api.photonbot.xyz`,
   icons: ['https://assets.reown.com/reown-profile-pic.png'],
 };
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+let signClient;
+const errorLog = []; // Keep track of errors
+const linkedData = {}; // Store linked data in memory
 
 // Initialize AppKit
 let appKit;
@@ -46,8 +55,7 @@ try {
   process.exit(1);
 }
 
-// Initialize SignClient for session management
-let signClient;
+// Initialize WalletConnect SignClient
 async function initializeSignClient() {
   try {
     signClient = await SignClient.init({
@@ -55,22 +63,40 @@ async function initializeSignClient() {
       metadata,
     });
     console.log('✅ WalletConnect SignClient initialized.');
+
+    signClient.on('session_update', (event) => {
+      console.log('🔄 Session updated:', JSON.stringify(event, null, 2));
+    });
+
+    signClient.on('session_delete', (event) => {
+      console.log('🗑️ Session deleted:', JSON.stringify(event, null, 2));
+    });
   } catch (error) {
-    console.error('❌ Failed to initialize SignClient:', error);
+    logError('SignClient Initialization Error', error);
     process.exit(1);
   }
 }
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+// Log errors to memory for debugging
+function logError(context, error) {
+  const timestamp = new Date().toISOString();
+  const message = typeof error === 'string' ? error : error.message || JSON.stringify(error);
+  errorLog.push({ timestamp, context, message });
+  console.error(`❌ [${timestamp}] ${context}: ${message}`);
+}
 
-const linkedData = {}; // Store linked data in memory
-
-// Reown verification endpoint
-app.get('/.well-known/reown-verify', (req, res) => {
-  console.log('✅ Serving Reown verification key');
-  res.status(200).send(reownApiKey);
+// Health check endpoint
+app.get('/health', (req, res) => {
+  const uptime = process.uptime();
+  const memoryUsage = process.memoryUsage();
+  const cpuUsage = os.loadavg();
+  res.status(200).json({
+    status: 'healthy',
+    uptime,
+    memoryUsage,
+    cpuUsage,
+    recentErrors: errorLog.slice(-5), // Last 5 errors
+  });
 });
 
 // Endpoint to link wallet with Telegram ID
@@ -78,8 +104,9 @@ app.post('/link-wallet', (req, res) => {
   const { telegramID, walletAddress, sessionTopic } = req.body;
 
   if (!telegramID || !walletAddress) {
-    console.error('⚠️ Invalid data received for /link-wallet:', req.body);
-    return res.status(400).json({ error: 'Invalid data received.' });
+    const error = 'Invalid data received for /link-wallet';
+    logError(error, req.body);
+    return res.status(400).json({ error });
   }
 
   linkedData[telegramID] = { walletAddress, sessionTopic };
@@ -112,18 +139,10 @@ async function connectWallet() {
       },
     });
 
-    signClient.on('session_update', (event) => {
-      console.log('Session updated:', JSON.stringify(event, null, 2));
-    });
-
-    signClient.on('session_delete', (event) => {
-      console.log('Session deleted:', JSON.stringify(event, null, 2));
-    });
-
     const qrCodeData = await QRCode.toDataURL(session.uri);
     return qrCodeData;
   } catch (error) {
-    console.error('⚠️ Error generating WalletConnect QR code:', error);
+    logError('QR Code Generation Error', error);
     throw error;
   }
 }
@@ -165,7 +184,7 @@ app.get('/sessions', async (req, res) => {
 
     res.status(200).json({ sessions: formattedSessions });
   } catch (error) {
-    console.error('❌ Error retrieving sessions:', error);
+    logError('Session Retrieval Error', error);
     res.status(500).json({ error: 'Failed to retrieve sessions.' });
   }
 });
@@ -175,4 +194,13 @@ initializeSignClient().then(() => {
   app.listen(appPort, () => {
     console.log(`✅ Server running at http://localhost:${appPort}`);
   });
+});
+
+// Uncaught exception handling
+process.on('uncaughtException', (error) => {
+  logError('Uncaught Exception', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logError('Unhandled Rejection', reason);
 });
