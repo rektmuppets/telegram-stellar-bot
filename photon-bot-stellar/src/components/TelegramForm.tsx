@@ -1,6 +1,5 @@
 import React, { useState } from "react";
 
-// Interface for props
 interface TelegramFormProps {
   walletAddress: string | null;
   sessionTopic: string | null;
@@ -13,9 +12,13 @@ const TelegramForm: React.FC<TelegramFormProps> = ({ walletAddress, sessionTopic
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
 
+    if (!walletAddress || !sessionTopic) {
+      setStatusMessage("Please connect your wallet first.");
+      return;
+    }
+
     try {
-      // Send data to the backend
-      const response = await fetch("http://localhost:4000/link-wallet", {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/link-wallet`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -26,10 +29,8 @@ const TelegramForm: React.FC<TelegramFormProps> = ({ walletAddress, sessionTopic
       });
 
       if (response.ok) {
-        // Success message
         setStatusMessage("Telegram ID linked successfully!");
       } else {
-        // Error message from backend
         setStatusMessage("Failed to link Telegram ID. Please try again.");
       }
     } catch (error) {
@@ -40,17 +41,23 @@ const TelegramForm: React.FC<TelegramFormProps> = ({ walletAddress, sessionTopic
 
   return (
     <form onSubmit={handleSubmit}>
-      <p>Wallet Address: {walletAddress || "Not connected"}</p>
-      <p>Session Topic: {sessionTopic || "No session"}</p>
-      <label htmlFor="telegramId">Telegram ID:</label>
-      <input
-        id="telegramId"
-        type="text"
-        value={telegramId}
-        onChange={(e) => setTelegramId(e.target.value)}
-        placeholder="Enter your Telegram ID"
-      />
-      <button type="submit">Link Telegram ID</button>
+      {!walletAddress || !sessionTopic ? (
+        <p>Please connect your wallet before linking your Telegram ID.</p>
+      ) : (
+        <>
+          <p>Wallet Address: {walletAddress}</p>
+          <p>Session Topic: {sessionTopic}</p>
+          <label htmlFor="telegramId">Telegram ID:</label>
+          <input
+            id="telegramId"
+            type="text"
+            value={telegramId}
+            onChange={(e) => setTelegramId(e.target.value)}
+            placeholder="Enter your Telegram ID"
+          />
+          <button type="submit">Link Telegram ID</button>
+        </>
+      )}
       {statusMessage && <p>{statusMessage}</p>}
     </form>
   );

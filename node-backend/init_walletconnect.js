@@ -10,9 +10,9 @@ import os from 'os';
 // Load environment variables
 dotenv.config();
 
-const projectId = process.env.PROJECT_ID;
-const reownApiKey = process.env.REOWN_API_KEY;
-const appPort = process.env.PORT;
+const projectId = process.env.PROJECT_ID || 'bfdee2a88917a9e26b82aef708214be7';
+const reownApiKey = process.env.REOWN_API_KEY || 'c0a1c1e4-83db-4d0a-9322-483fa104f3ec';
+const appPort = process.env.PORT || 4000;
 
 if (!projectId) {
   throw new Error("PROJECT_ID is not defined in the environment variables.");
@@ -166,7 +166,8 @@ app.get('/sessions', async (req, res) => {
 
     const sessions = signClient.session.values;
     if (!sessions || sessions.length === 0) {
-      return res.status(404).json({ error: 'No active sessions found.' });
+      // Return an empty array if no sessions exist
+      return res.status(200).json({ sessions: [] });
     }
 
     const formattedSessions = sessions.map((session) => {
