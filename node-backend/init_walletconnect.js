@@ -10,9 +10,9 @@ import os from 'os';
 // Load environment variables
 dotenv.config();
 
-const projectId = process.env.PROJECT_ID || 'bfdee2a88917a9e26b82aef708214be7';
-const reownApiKey = process.env.REOWN_API_KEY || 'c0a1c1e4-83db-4d0a-9322-483fa104f3ec';
-const appPort = process.env.PORT || 4000;
+const projectId = process.env.PROJECT_ID;
+const reownApiKey = process.env.REOWN_API_KEY;
+const appPort = process.env.PORT;
 
 if (!projectId) {
   throw new Error("PROJECT_ID is not defined in the environment variables.");
