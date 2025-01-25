@@ -7,6 +7,7 @@ import { saveWalletLink } from './database.js';
 import { logError } from './walletconnect/utils.js';
 import { getUserByUsername } from './database.js';
 import { db } from './database.js';
+import { addUser } from './database.js'; // Import the function to interact with the database
 
 dotenv.config();
 
@@ -99,6 +100,25 @@ app.get('/test-db', async (req, res) => {
     } catch (error) {
         console.error('Database Connection Error:', error);
         res.status(500).json({ error: 'Failed to connect to the database.' });
+    }
+});
+
+// Add User Endpoint
+app.post('/add-user', async (req, res) => {
+    const { username, walletAddress, telegramID, referralCode } = req.body;
+
+    // Validate the request body
+    if (!username || !walletAddress || !telegramID) {
+        return res.status(400).json({ error: 'Missing required fields.' });
+    }
+
+    try {
+        // Call the database function to add a user
+        const user = await addUser(username, walletAddress, telegramID, referralCode || null);
+        res.status(201).json({ message: 'User added successfully.', user });
+    } catch (error) {
+        console.error('❌ Add User Error:', error);
+        res.status(500).json({ error: 'Failed to add user.' });
     }
 });
 
