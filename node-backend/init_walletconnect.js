@@ -1,23 +1,24 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import os from 'os';
-import { initializeSignClient, signClient, connectWallet } from './walletconnect/session.js'; // Import connectWallet
-import { saveWalletLink } from './database.js';
+import { initializeSignClient, signClient, connectWallet } from './walletconnect/session.js';
+import { saveWalletLink, getUserByUsername, addUser, db } from './database.js';
 import { logError } from './walletconnect/utils.js';
-import { getUserByUsername } from './database.js';
-import { db } from './database.js';
-import { addUser } from './database.js'; // Import the function to interact with the database
 
 dotenv.config();
 
 const projectId = process.env.PROJECT_ID;
-const reownApiKey = process.env.REOWN_API_KEY;
-const appPort = process.env.PORT;
-
+const appPort = process.env.PORT || 4000; // Default to 4000 if PORT is not set
 const app = express();
+
 app.use(cors());
 app.use(express.json());
+
+// Debugging Middleware: Logs all incoming requests
+app.use((req, res, next) => {
+    console.log(`[DEBUG] Incoming Request: ${req.method} ${req.url}`);
+    next();
+});
 
 // Initialize WalletConnect
 initializeSignClient(projectId, {
@@ -34,7 +35,7 @@ initializeSignClient(projectId, {
 app.get('/connect-wallet', async (req, res) => {
     try {
         console.log('Calling connectWallet...');
-        const qrCode = await connectWallet(); // Use connectWallet from session.js
+        const qrCode = await connectWallet();
         res.json({ qrCode });
     } catch (err) {
         logError('Connect Wallet Error', err);
@@ -42,46 +43,57 @@ app.get('/connect-wallet', async (req, res) => {
     }
 });
 
-// Sessions endpoint
+// Endpoint to retrieve active sessions
 app.get('/sessions', async (req, res) => {
-  try {
-      if (!signClient) {
-          return res.status(500).json({ error: 'SignClient not initialized.' });
-      }
+    try {
+        if (!signClient) {
+            return res.status(500).json({ error: 'SignClient not initialized.' });
+        }
 
-      const sessions = signClient.session.values; // Access signClient.session.values
-      console.log('Active Sessions:', sessions);
+        const sessions = signClient.session.values;
+        console.log('Active Sessions:', sessions);
 
-      if (!sessions || sessions.length === 0) {
-          return res.status(200).json({ sessions: [] });
-      }
+        if (!sessions || sessions.length === 0) {
+            return res.status(200).json({ sessions: [] });
+        }
 
-      const formattedSessions = sessions.map((session) => {
-          const { topic, namespaces } = session;
-          const stellarNamespace = namespaces.stellar || {};
-          const accounts = stellarNamespace.accounts || [];
-          const publicKeys = accounts.map((account) => account.split(':')[2]);
+        const formattedSessions = sessions.map((session) => {
+            const { topic, namespaces } = session;
+            const stellarNamespace = namespaces.stellar || {};
+            const accounts = stellarNamespace.accounts || [];
+            const publicKeys = accounts.map((account) => account.split(':')[2]);
 
-          return {
-              topic,
-              namespaces,
-              publicKeys,
-          };
-      });
+            return {
+                topic,
+                namespaces,
+                publicKeys,
+            };
+        });
 
-      res.status(200).json({ sessions: formattedSessions });
-  } catch (error) {
-      logError('Session Retrieval Error', error);
-      res.status(500).json({ error: 'Failed to retrieve sessions.' });
-  }
+        res.status(200).json({ sessions: formattedSessions });
+    } catch (error) {
+        logError('Session Retrieval Error', error);
+        res.status(500).json({ error: 'Failed to retrieve sessions.' });
+    }
 });
 
+// Test Database Endpoint
+app.get('/test-db', async (req, res) => {
+    try {
+        const result = await db.query('SELECT NOW()');
+        res.status(200).json({ message: 'Database connection successful!', timestamp: result.rows[0].now });
+    } catch (error) {
+        console.error('Database Connection Error:', error);
+        res.status(500).json({ error: 'Failed to connect to the database.' });
+    }
+});
+
+// Get User by Username Endpoint
 app.get('/user/:username', async (req, res) => {
     const { username } = req.params;
 
     try {
         const user = await getUserByUsername(username);
-
         if (!user) {
             return res.status(404).json({ error: 'User not found.' });
         }
@@ -90,16 +102,6 @@ app.get('/user/:username', async (req, res) => {
     } catch (error) {
         console.error('❌ Get User Error:', error);
         res.status(500).json({ error: 'Failed to retrieve user.' });
-    }
-});
-
-app.get('/test-db', async (req, res) => {
-    try {
-        const result = await db.query('SELECT NOW()');
-        res.status(200).json({ message: 'Database connection successful!', timestamp: result.rows[0].now });
-    } catch (error) {
-        console.error('Database Connection Error:', error);
-        res.status(500).json({ error: 'Failed to connect to the database.' });
     }
 });
 
@@ -124,8 +126,7 @@ app.post('/add-user', async (req, res) => {
     }
 });
 
-
 // Start the server
 app.listen(appPort, () => {
-  console.log(`✅ Server running at http://localhost:${appPort}`);
+    console.log(`✅ Server running at http://localhost:${appPort}`);
 });
