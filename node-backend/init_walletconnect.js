@@ -105,15 +105,17 @@ app.get('/test-db', async (req, res) => {
 
 // Add User Endpoint
 app.post('/add-user', async (req, res) => {
+    console.log('Incoming Request Headers:', req.headers);
+    console.log('Raw Request Body:', req.body);
+
     const { username, walletAddress, telegramID, referralCode } = req.body;
 
-    // Validate the request body
     if (!username || !walletAddress || !telegramID) {
+        console.log('Validation failed. Body:', req.body);
         return res.status(400).json({ error: 'Missing required fields.' });
     }
 
     try {
-        // Call the database function to add a user
         const user = await addUser(username, walletAddress, telegramID, referralCode || null);
         res.status(201).json({ message: 'User added successfully.', user });
     } catch (error) {
