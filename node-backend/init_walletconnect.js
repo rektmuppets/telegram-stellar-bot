@@ -121,8 +121,49 @@ app.post('/add-user', async (req, res) => {
         const user = await addUser(username, walletAddress, telegramID, referralCode || null);
         res.status(201).json({ message: 'User added successfully.', user });
     } catch (error) {
+        if (error.code === '23505') {
+            // Handle duplicate key error
+            return res.status(409).json({
+                error: `A user with this wallet address (${walletAddress}) already exists.`,
+            });
+        }
         console.error('❌ Add User Error:', error);
         res.status(500).json({ error: 'Failed to add user.' });
+    }
+});
+
+app.post('/forget-wallet', async (req, res) => {
+    const { telegramID } = req.body;
+
+    if (!telegramID) {
+        return res.status(400).json({ error: 'Telegram ID is required.' });
+    }
+
+    try {
+        // Check if the user exists
+        const userQuery = 'SELECT id FROM users WHERE telegram_id = $1';
+        const userResult = await db.query(userQuery, [telegramID]);
+
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found.' });
+        }
+
+        // Unlink the wallet and signer
+        const updateQuery = `
+            UPDATE users
+            SET wallet_address = NULL, signer_keypair = NULL, is_signer_connected = false
+            WHERE telegram_id = $1
+            RETURNING *;
+        `;
+        const updateResult = await db.query(updateQuery, [telegramID]);
+
+        res.status(200).json({
+            message: 'Wallet successfully unlinked.',
+            user: updateResult.rows[0],
+        });
+    } catch (error) {
+        console.error('❌ Forget Wallet Error:', error);
+        res.status(500).json({ error: 'Failed to unlink wallet.' });
     }
 });
 
