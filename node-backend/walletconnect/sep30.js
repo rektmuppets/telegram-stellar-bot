@@ -1,36 +1,98 @@
-const { TransactionBuilder, Networks, Keypair } = require('stellar-sdk');
-const { encrypt } = require('./utils'); // Helper for encryption
-const { saveSigner } = require('../database');
+import StellarBase from '@stellar/stellar-base';
+import crypto from 'crypto';
+import axios from 'axios'; // For Horizon API requests
 
-// Create SEP-30 transaction to add lightweight signer
-async function createAddSignerTransaction(userPublicKey) {
-    const botKeypair = Keypair.random(); // Generate bot keypair
-    const transaction = new TransactionBuilder(userPublicKey, {
-        fee: '100',
-        networkPassphrase: Networks.PUBLIC,
-    })
-        .addOperation({
-            type: 'setOptions',
-            signer: { ed25519PublicKey: botKeypair.publicKey(), weight: 1 },
-        })
+// Function to fetch the sequence number for a Stellar account
+export async function fetchSequenceNumber(publicKey) {
+    try {
+        const response = await axios.get(`https://horizon-testnet.stellar.org/accounts/${publicKey}`); // Testnet URL
+        return response.data.sequence;
+    } catch (error) {
+        console.error('Failed to fetch sequence number:', error.message);
+        throw new Error('Unable to fetch sequence number from Horizon.');
+    }
+}
+
+// Function to create a SEP-30 transaction for adding a lightweight signer with proper thresholds
+export async function createAddSignerTransaction(userPublicKey) {
+    const sequenceNumber = await fetchSequenceNumber(userPublicKey);
+
+    // Generate lightweight signer keypair
+    const botKeypair = StellarBase.Keypair.random();
+    console.log(`Generated Bot Public Key: ${botKeypair.publicKey()}`);
+    console.log(`Generated Bot Secret Key: ${botKeypair.secret()}`); // Secure this
+
+    // Build the transaction with updated thresholds and signer weights
+    const transaction = new StellarBase.TransactionBuilder(
+        new StellarBase.Account(userPublicKey, sequenceNumber),
+        {
+            fee: StellarBase.BASE_FEE,
+            networkPassphrase: StellarBase.Networks.TESTNET,
+        }
+    )
+        // Step 1: Set thresholds (low = 2, medium = 3, high = 5)
+        .addOperation(StellarBase.Operation.setOptions({
+            lowThreshold: 2,  // Bot can add trustlines
+            medThreshold: 3,  // Bot can execute trades (DEX swaps)
+            highThreshold: 5, // Bot CANNOT withdraw or remove signers
+            masterWeight: 3,   // Ensure master has full control
+        }))
+        // Step 2: Add lightweight bot signer with weight 3
+        .addOperation(StellarBase.Operation.setOptions({
+            signer: {
+                ed25519PublicKey: botKeypair.publicKey(),
+                weight: 3, // Bot can add trustlines & trade, but not withdraw
+            },
+        }))
         .setTimeout(30)
         .build();
 
+    // Return the XDR and bot's secret key
     return {
         xdr: transaction.toXDR(),
-        botPrivateKey: botKeypair.secret(), // Save this securely
+        botSecret: botKeypair.secret(),
     };
 }
 
-// Initiate signer setup and save the signer to the database
-async function setupSigner(userPublicKey, telegramID) {
-    const { xdr, botPrivateKey } = await createAddSignerTransaction(userPublicKey);
+// Function to create a transaction for removing the lightweight signer
+export async function createRemoveSignerTransaction(userPublicKey, signerPublicKey) {
+    const sequenceNumber = await fetchSequenceNumber(userPublicKey);
 
-    // Encrypt private key and save it to the database
-    const encryptedPrivateKey = encrypt(botPrivateKey);
-    await saveSigner({ telegramID, walletAddress: userPublicKey, encryptedPrivateKey });
+    const transaction = new StellarBase.TransactionBuilder(
+        new StellarBase.Account(userPublicKey, sequenceNumber),
+        {
+            fee: StellarBase.BASE_FEE,
+            networkPassphrase: StellarBase.Networks.TESTNET,
+        }
+    )
+        // Adjust thresholds to allow signer removal
+        .addOperation(StellarBase.Operation.setOptions({
+            lowThreshold: 1,
+            medThreshold: 2,
+            highThreshold: 2, // Ensures account remains usable
+        }))
+        // Remove the lightweight signer
+        .addOperation(StellarBase.Operation.setOptions({
+            signer: {
+                ed25519PublicKey: signerPublicKey,
+                weight: 0, // Remove signer by setting weight to 0
+            },
+        }))
+        .setTimeout(30)
+        .build();
 
-    return xdr; // Return XDR for signing
+    // Return the XDR
+    return transaction.toXDR();
 }
 
-module.exports = { setupSigner };
+// Optional: Function to encrypt the bot's private key before saving to the database
+export function encryptPrivateKey(secretKey) {
+    const algorithm = 'aes-256-ctr';
+    const key = process.env.ENCRYPTION_KEY; // 32-byte key from .env
+    const iv = crypto.randomBytes(16);
+
+    const cipher = crypto.createCipheriv(algorithm, key, iv);
+    const encrypted = Buffer.concat([cipher.update(secretKey), cipher.final()]);
+
+    return `${iv.toString('hex')}:${encrypted.toString('hex')}`;
+}

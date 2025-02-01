@@ -34,7 +34,7 @@ export async function connectWallet() {
         const session = await signClient.connect({
             requiredNamespaces: {
                 stellar: {
-                    chains: ['stellar:pubnet'],
+                    chains: ['stellar:testnet'],
                     methods: ['stellar_signAndSubmitXDR', 'stellar_signXDR'],
                     events: [],
                 },

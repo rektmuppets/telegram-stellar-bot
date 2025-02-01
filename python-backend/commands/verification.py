@@ -14,27 +14,27 @@ LINK_WALLET_URL = os.getenv("LINK_WALLET_URL", "https://api.photonbot.xyz/link-w
 
 @router.message(Command("connectwallet"))
 async def connect_wallet(message: types.Message):
+    """
+    Step 1: User initiates connection, QR is sent
+    """
     try:
         response = requests.get(CONNECT_WALLET_URL)
+        if response.status_code != 200:
+            await message.reply(f"⚠️ Error generating QR code.")
+            return
+        
+        qr_code_data = response.json().get("qrCode")
+        qr_code_bytes = base64.b64decode(qr_code_data.split(",")[1])
 
-        if response.status_code == 200:
-            qr_code_data = response.json().get("qrCode")
-            if not qr_code_data:
-                await message.reply("⚠️ QR code data is missing in the server response.")
-                return
+        temp_file_path = "temp_qr.png"
+        with open(temp_file_path, "wb") as temp_file:
+            temp_file.write(qr_code_bytes)
 
-            qr_code_bytes = base64.b64decode(qr_code_data.split(",")[1])
-            temp_file_path = "temp_qr.png"
-            with open(temp_file_path, "wb") as temp_file:
-                temp_file.write(qr_code_bytes)
+        qr_code_file = FSInputFile(temp_file_path, filename="walletconnect_qr.png")
+        await message.answer_photo(qr_code_file, caption="Scan this QR code to connect your wallet.")
 
-            qr_code_file = FSInputFile(temp_file_path, filename="walletconnect_qr.png")
-            await message.answer_photo(qr_code_file, caption="Scan this QR code to connect your wallet.")
-        else:
-            await message.reply(f"⚠️ Server error: {response.status_code}")
     except Exception as e:
         await message.reply(f"⚠️ An error occurred: {str(e)}")
-
 
 @router.message(Command("register"))
 async def register(message: types.Message):

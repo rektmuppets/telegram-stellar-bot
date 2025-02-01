@@ -4,10 +4,12 @@ import dotenv from 'dotenv';
 import { initializeSignClient, signClient, connectWallet } from './walletconnect/session.js';
 import { saveWalletLink, getUserByUsername, addUser, db } from './database.js';
 import { logError } from './walletconnect/utils.js';
+import { createAddSignerTransaction, encryptPrivateKey, createRemoveSignerTransaction, fetchSequenceNumber } from './walletconnect/sep30.js';
+
 
 dotenv.config();
 
-const projectId = process.env.PROJECT_ID;
+const projectId = process.env.PROJECT_ID ||'bfdee2a88917a9e26b82aef708214be7';
 const appPort = process.env.PORT || 4000; // Default to 4000 if PORT is not set
 const app = express();
 
@@ -164,6 +166,165 @@ app.post('/forget-wallet', async (req, res) => {
     } catch (error) {
         console.error('❌ Forget Wallet Error:', error);
         res.status(500).json({ error: 'Failed to unlink wallet.' });
+    }
+});
+
+app.post('/add-signer', async (req, res) => {
+    const { sessionTopic, telegramID } = req.body;
+
+    if (!sessionTopic || !telegramID) {
+        return res.status(400).json({ error: 'Missing required parameters: sessionTopic or telegramID.' });
+    }
+
+    try {
+        // Find the WalletConnect session
+        const sessions = signClient.session.values;
+        const session = sessions.find(s => s.topic === sessionTopic);
+
+        if (!session) {
+            return res.status(404).json({ error: 'Session not found for the provided sessionTopic.' });
+        }
+
+        // Extract the Stellar public key
+        const stellarNamespace = session.namespaces.stellar || {};
+        const accounts = stellarNamespace.accounts || [];
+
+        if (accounts.length === 0) {
+            return res.status(404).json({ error: 'No Stellar accounts found in the session.' });
+        }
+
+        const userPublicKey = accounts[0].split(':')[2];
+        console.log('User Public Key:', userPublicKey);
+
+        // Fetch the correct sequence number
+        const sequenceNumber = await fetchSequenceNumber(userPublicKey);
+        console.log('Fetched Sequence Number:', sequenceNumber);
+
+        // Generate the transaction
+        const { xdr, botSecret } = await createAddSignerTransaction(userPublicKey, { sequenceNumber });
+        console.log('Generated Transaction XDR:', xdr);
+
+        // Send the transaction via WalletConnect
+        const response = await signClient.request({
+            topic: sessionTopic,
+            chainId: 'stellar:testnet',
+            request: {
+                method: 'stellar_signAndSubmitXDR',
+                params: { xdr },
+            },
+        });
+
+        if (response.status === 'success') {
+            console.log('Signer added successfully!');
+
+            // Encrypt and save the bot's private key
+            const encryptedKey = encryptPrivateKey(botSecret);
+            res.status(200).json({ message: 'Signer added successfully!', encryptedKey });
+        } else if (response.status === 'pending') {
+            console.log('Transaction is pending additional signatures.');
+            res.status(200).json({ message: 'Transaction is pending additional signatures.' });
+        } else {
+            console.error('Failed to add signer:', response);
+            res.status(500).json({ error: 'Failed to add signer.' });
+        }
+    } catch (error) {
+        if (error.code === -32000 && error.message === 'User rejected the request') {
+            console.warn('User rejected the signing request.');
+            return res.status(400).json({ error: 'User rejected the signing request.' });
+        }
+
+        console.error('Error adding signer:', error);
+        res.status(500).json({ error: 'Internal server error.' });
+    }
+});
+
+app.post('/remove-signer', async (req, res) => {
+    const { sessionTopic, telegramID, signerPublicKey } = req.body;
+
+    if (!sessionTopic || !telegramID || !signerPublicKey) {
+        return res.status(400).json({ error: 'Missing required parameters: sessionTopic, telegramID, or signerPublicKey.' });
+    }
+
+    try {
+        // Step 1: Find the WalletConnect session
+        const sessions = signClient.session.values;
+        const session = sessions.find(s => s.topic === sessionTopic);
+
+        if (!session) {
+            return res.status(404).json({ error: 'Session not found for the provided sessionTopic.' });
+        }
+
+        // Step 2: Extract user's Stellar public key
+        const stellarNamespace = session.namespaces.stellar || {};
+        const accounts = stellarNamespace.accounts || [];
+
+        if (accounts.length === 0) {
+            return res.status(404).json({ error: 'No Stellar accounts found in the session.' });
+        }
+
+        const userPublicKey = accounts[0].split(':')[2];
+        console.log('User Public Key:', userPublicKey);
+
+        // Step 3: Fetch the correct sequence number for the account
+        const sequenceNumber = await fetchSequenceNumber(userPublicKey);
+        console.log('Fetched Sequence Number:', sequenceNumber);
+
+        // Step 4: Generate the remove signer transaction
+        const xdr = await createRemoveSignerTransaction(userPublicKey, signerPublicKey);
+        console.log('Generated Remove Signer Transaction XDR:', xdr);
+
+        // Step 5: Send the transaction via WalletConnect
+        const response = await signClient.request({
+            topic: sessionTopic,
+            chainId: 'stellar:testnet', // Or 'stellar:testnet' if testing
+            request: {
+                method: 'stellar_signAndSubmitXDR',
+                params: { xdr },
+            },
+        });
+
+        // Step 6: Handle WalletConnect response
+        if (response.status === 'success') {
+            console.log('Signer removed successfully!');
+            res.status(200).json({ message: 'Signer removed successfully!' });
+        } else if (response.status === 'pending') {
+            console.log('Transaction is pending additional signatures.');
+            res.status(200).json({ message: 'Transaction is pending additional signatures.' });
+        } else {
+            console.error('Failed to remove signer:', response);
+            res.status(500).json({ error: 'Failed to remove signer.' });
+        }
+    } catch (error) {
+        if (error.code === -32000 && error.message === 'User rejected the request') {
+            console.warn('User rejected the signing request.');
+            return res.status(400).json({ error: 'User rejected the signing request.' });
+        }
+
+        console.error('Error removing signer:', error);
+        res.status(500).json({ error: 'Internal server error.' });
+    }
+});
+
+app.get('/reconnect/:telegramID', async (req, res) => {
+    const { telegramID } = req.params;
+
+    try {
+        const user = await getUserByTelegramID(telegramID);
+        if (!user || !user.session_topic) {
+            return res.status(404).json({ error: 'No active session found.' });
+        }
+
+        console.log(`🔄 Reconnecting session: ${user.session_topic}`);
+        const response = await signClient.request({
+            topic: user.session_topic,
+            chainId: 'stellar:testnet',
+            request: { method: 'wallet_reconnect' }
+        });
+
+        res.json({ message: 'Session reconnected', response });
+    } catch (error) {
+        console.error('Reconnect error:', error);
+        res.status(500).json({ error: 'Failed to reconnect session.' });
     }
 });
 
