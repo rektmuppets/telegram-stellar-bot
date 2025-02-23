@@ -48,3 +48,7 @@ node-backend/test_session.js
 output/
 *.enc
 __pycache__/
+
+copy_trading.db
+
+venv311/

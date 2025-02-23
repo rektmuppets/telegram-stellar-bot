@@ -1,121 +1,116 @@
-from aiogram import types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import time
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from stellar_sdk import Server, Keypair, TransactionBuilder, Network, Asset
+from aiogram import types, Dispatcher
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from utils import load_keypair
-import logging
+from stellar_sdk import Asset, Payment, ChangeTrust
+from stellar_utils import build_transaction, server, TESTNET
 
-horizon = Server("https://horizon-testnet.stellar.org")
-bot_kp = load_keypair()
-logger = logging.getLogger(__name__)
+class TradeStates(StatesGroup):
+    price = State()
+    amount = State()
+    withdraw_amount = State()
+    withdraw_address = State()
 
-async def start(message: types.Message, state: FSMContext):
-    await state.clear()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Trade", callback_data="trade")],
-        [InlineKeyboardButton(text="Withdraw", callback_data="withdraw")]
+async def arb_command(message: types.Message, state: FSMContext):
+    prices = [0.05, 0.1, 0.25, 0.5]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{price} XLM/USDC", callback_data=f"price_{price}") for price in prices],
+        [InlineKeyboardButton(text="Cancel", callback_data="cancel")]
     ])
-    await message.reply(f"Fund me (Testnet): {bot_kp.public_key}", reply_markup=kb)
-    logger.info(f"Started bot for user {message.from_user.id}")
+    await message.reply("Select a price for USDC arbitrage:", reply_markup=keyboard)
+    await state.set_state(TradeStates.price)
 
-async def trade_menu(callback: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Arb USDC", callback_data="arb_usdc")]
-    ])
-    await callback.message.edit_text("Choose trade:", reply_markup=kb)
-    logger.info(f"User {callback.from_user.id} opened trade menu")
-
-async def arb_usdc(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Enter amount (e.g., 5):")
-    await state.set_state("arb_amount")
-    logger.info(f"User {callback.from_user.id} prompted for arb amount, state set to arb_amount")
-
-async def arb_amount(message: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    logger.info(f"User {message.from_user.id} in state {current_state}, input: {message.text}")
-    amount = message.text.strip()
-    try:
-        float(amount)
-        acct = horizon.load_account(bot_kp.public_key)
-        tx_builder = TransactionBuilder(
-            source_account=acct,
-            network_passphrase=Network.TESTNET_NETWORK_PASSPHRASE,
-            base_fee=100
-        )
-        tx_builder = tx_builder.add_time_bounds(0, 0)
-        tx_builder = tx_builder.append_manage_buy_offer_op(
-            selling=Asset.native(),
-            buying=Asset("USDC", "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"),
-            amount=amount,
-            price="0.10"
-        )
-        tx = tx_builder.build()
-        tx.sign(bot_kp)
-        horizon.submit_transaction(tx)
-        await message.reply(f"Arbed {amount} USDC on Testnet!")
+async def process_price(callback: types.CallbackQuery, state: FSMContext):
+    if callback.data == "cancel":
         await state.clear()
-        logger.info(f"User {message.from_user.id} arbed {amount} USDC successfully")
-    except ValueError:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Back to Start", callback_data="restart")]
-        ])
-        await message.reply("Invalid amount! Please enter a number (e.g., 5).", reply_markup=kb)
-        logger.warning(f"User {message.from_user.id} entered invalid arb amount: {amount}")
-    except Exception as e:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Back to Start", callback_data="restart")]
-        ])
-        await message.reply(f"Error: {str(e)}\nTry again or go back:", reply_markup=kb)
-        logger.error(f"User {message.from_user.id} hit arb error: {str(e)}")
-
-async def withdraw_menu(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Enter amount and address (e.g., 5 GAW56...):")
-    await state.set_state("withdraw_process")
-    logger.info(f"User {callback.from_user.id} prompted for withdraw input, state set to withdraw_process")
-
-async def withdraw_process(message: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    logger.info(f"User {message.from_user.id} in state {current_state}, input: {message.text}")
-    args = message.text.strip().split()
-    if len(args) != 2:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Back to Start", callback_data="restart")]
-        ])
-        await message.reply("Invalid input! Use: <amount> <address> (e.g., 5 GAW56...).", reply_markup=kb)
-        logger.warning(f"User {message.from_user.id} entered invalid withdraw input: {message.text}")
+        await callback.message.edit_text("Cancelled.")
         return
-    amount, dest = args[0], args[1]
+    price = float(callback.data.split("_")[1])
+    await state.update_data(price=price)
+    await callback.message.edit_text(f"Selected price: {price}. Enter amount:")
+    await state.set_state(TradeStates.amount)
+
+async def withdraw_command(message: types.Message, state: FSMContext):
+    await message.reply("Enter amount to withdraw (XLM):")
+    await state.set_state(TradeStates.withdraw_amount)
+
+async def process_withdraw_amount(message: types.Message, state: FSMContext):
     try:
-        float(amount)
-        if not dest.startswith("G") or len(dest) != 56:
-            raise ValueError("Invalid Stellar address")
-        acct = horizon.load_account(bot_kp.public_key)
-        tx_builder = TransactionBuilder(
-            source_account=acct,
-            network_passphrase=Network.TESTNET_NETWORK_PASSPHRASE,
-            base_fee=100
-        )
-        tx_builder = tx_builder.add_time_bounds(0, 0)
-        tx_builder = tx_builder.append_payment_op(
-            destination=dest,
-            asset=Asset.native(),
-            amount=amount
-        )
-        tx = tx_builder.build()
-        tx.sign(bot_kp)
-        horizon.submit_transaction(tx)
-        await message.reply(f"Withdrew {amount} XLM to {dest}")
+        amount = float(message.text)
+        await state.update_data(amount=amount)
+        await message.reply("Enter destination address:")
+        await state.set_state(TradeStates.withdraw_address)
+    except ValueError:
+        await message.reply("Invalid amount. Try again or /cancel.")
+
+async def process_withdraw_address(message: types.Message, state: FSMContext, db_pool):
+    address = message.text
+    data = await state.get_data()
+    amount = data["amount"]
+    telegram_id = message.from_user.id
+    try:
+        keypair = await load_keypair(telegram_id, db_pool)
+        account = server.load_account(keypair.public_key)
+        
+        operations = [
+            Payment(
+                destination=address,
+                asset=Asset.native(),
+                amount=str(amount)
+            )
+        ]
+        
+        tx = await build_transaction(account, keypair, operations)
+        response = server.submit_transaction(tx)
+        await message.reply(f"Withdrawn {amount} XLM to {address}. Tx: {response['hash']}")
         await state.clear()
-        logger.info(f"User {message.from_user.id} withdrew {amount} XLM to {dest} successfully")
-    except ValueError as e:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Back to Start", callback_data="restart")]
-        ])
-        await message.reply(f"Invalid input: {str(e)}! Use: <amount> <address> (e.g., 5 GAW56...).", reply_markup=kb)
-        logger.warning(f"User {message.from_user.id} hit withdraw ValueError: {str(e)}")
     except Exception as e:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Back to Start", callback_data="restart")]
-        ])
-        await message.reply(f"Error: {str(e)}\nTry again or go back:", reply_markup=kb)
-        logger.error(f"User {message.from_user.id} hit withdraw error: {str(e)}")
+        await message.reply(f"Error: {str(e)}")
+        await state.clear()
+
+async def process_copy_trade(message: types.Message, asset_code: str, asset_issuer: str, amount: str, destination: str, db_pool):
+    telegram_id = message.from_user.id
+    try:
+        keypair = await load_keypair(telegram_id, db_pool)
+        account = server.load_account(keypair.public_key)
+        
+        new_asset = Asset(code=asset_code, issuer=asset_issuer)
+        operations = [
+            ChangeTrust(
+                asset=new_asset,
+                limit="1000.0"
+            ),
+            Payment(
+                destination=destination,
+                asset=new_asset,
+                amount=amount
+            )
+        ]
+        
+        tx = await build_transaction(account, keypair, operations)
+        response = server.submit_transaction(tx)
+        await message.reply(f"Copied trade: Trusted {asset_code} and sent {amount} to {destination}. Tx: {response['hash']}")
+    except Exception as e:
+        await message.reply(f"Copy trade failed: {str(e)}")
+
+async def add_trustline_command(message: types.Message, db_pool):
+    telegram_id = message.from_user.id
+    try:
+        keypair = await load_keypair(telegram_id, db_pool)
+        account = server.load_account(keypair.public_key)
+        
+        usdc_asset = Asset("USDC", "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5GMCOP5PXD")
+        operations = [
+            ChangeTrust(
+                asset=usdc_asset,
+                limit="1000.0"
+            )
+        ]
+        
+        tx = await build_transaction(account, keypair, operations)
+        response = server.submit_transaction(tx)
+        await message.reply(f"Trustline added for USDC. Tx: {response['hash']}")
+    except Exception as e:
+        await message.reply(f"Error: {str(e)}")
