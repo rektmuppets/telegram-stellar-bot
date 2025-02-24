@@ -29,7 +29,7 @@ async def load_keypair(telegram_id, db_pool):
         encrypted_secret = bytes.fromhex(user_data["encrypted_secret"])
         cipher = Fernet(user_data["encryption_key"].encode())
         secret = cipher.decrypt(encrypted_secret).decode()
-        print(f"Decrypted secret: {secret}")  # Debug: Should be SB...
+        print(f"Decrypted secret: {secret}")  # Debug: Should be SB...remove this its security risk
         keypair = Keypair.from_secret(secret)
         print(f"Keypair type: {type(keypair)}, public_key: {keypair.public_key}")  # Debug: Should be Keypair object
         return keypair

@@ -9,7 +9,7 @@ import json
 import asyncpg
 from dotenv import load_dotenv
 
-from trade import TradeStates, arb_command, process_price, process_withdraw_amount, process_withdraw_address, withdraw_command, process_copy_trade
+from trade import TradeStates, arb_command, process_price, process_withdraw_amount, process_withdraw_address, withdraw_command, process_copy_trade, test_signal_command, add_trustline_command
 from utils import init_db, load_keypair, list_copy_wallets, get_x_sentiment
 
 load_dotenv()
@@ -93,15 +93,23 @@ async def copy_trade_command(message: types.Message):
     await process_copy_trade(
         message,
         asset_code="USDC",
-        asset_issuer="GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5GMCOP5PXD",
+        asset_issuer="GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
         amount="100",
         destination="GAW56XMB3ECEDW4MV7HHCPOCFUCZSONS7ZOYQLVYR7E4537E3D4YJNDN",
         db_pool=db_pool
     )
 
-async def withdraw_address_wrapper(message: types.Message, state: FSMContext):  # New wrapper function
+async def withdraw_address_wrapper(message: types.Message, state: FSMContext):
     global db_pool
     await process_withdraw_address(message, state, db_pool)
+
+async def test_signal_wrapper(message: types.Message):
+    global db_pool
+    await test_signal_command(message, db_pool)
+
+async def add_trustline_wrapper(message: types.Message):  # New wrapper
+    global db_pool
+    await add_trustline_command(message, db_pool)
 
 async def copy_trading_loop():
     while True:
@@ -112,6 +120,13 @@ async def copy_trading_loop():
         except Exception as e:
             print(f"Error in copy_trading_loop: {e}")
         await asyncio.sleep(300)
+
+async def signal_listener(dp):
+    while True:
+        telegram_id = 5014800072  # Replace with your Telegram ID
+        # result, tx_hash = await mock_signal_test(telegram_id, db_pool)
+        # print(result, tx_hash)
+        await asyncio.sleep(60)
 
 async def main():
     await init_db_pool()
@@ -127,11 +142,14 @@ async def main():
     dp.callback_query.register(process_price, TradeStates.price)
     dp.message.register(withdraw_command, Command("withdraw"))
     dp.message.register(process_withdraw_amount, TradeStates.withdraw_amount)
-    dp.message.register(withdraw_address_wrapper, TradeStates.withdraw_address)  # Use wrapper
+    dp.message.register(withdraw_address_wrapper, TradeStates.withdraw_address)
     dp.message.register(copy_trade_command, Command("copytrade"))
+    dp.message.register(test_signal_wrapper, Command("testsignal"))
+    dp.message.register(add_trustline_wrapper, Command("addtrust"))  # Register addtrust
 
     init_db()
     asyncio.create_task(copy_trading_loop())
+    # asyncio.create_task(signal_listener(dp))
     print("Bot starting...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
