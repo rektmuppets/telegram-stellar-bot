@@ -9,7 +9,7 @@ import json
 import asyncpg
 from dotenv import load_dotenv
 
-from trade import TradeStates, arb_command, process_price, process_withdraw_amount, process_withdraw_address, withdraw_command, process_copy_trade, test_signal_command, add_trustline_command
+from trade import TradeStates, arb_command, process_price, process_withdraw_amount, process_withdraw_address, withdraw_command, process_copy_trade, test_signal_command, add_trustline_command, add_copy_account, copy_trade_listener
 from utils import init_db, load_keypair, list_copy_wallets, get_x_sentiment
 
 load_dotenv()
@@ -111,6 +111,10 @@ async def add_trustline_wrapper(message: types.Message):  # New wrapper
     global db_pool
     await add_trustline_command(message, db_pool)
 
+async def copy_trade_listener_wrapper(message: types.Message):
+    global db_pool
+    await copy_trade_listener(message, db_pool)
+
 async def copy_trading_loop():
     while True:
         try:
@@ -146,6 +150,8 @@ async def main():
     dp.message.register(copy_trade_command, Command("copytrade"))
     dp.message.register(test_signal_wrapper, Command("testsignal"))
     dp.message.register(add_trustline_wrapper, Command("addtrust"))  # Register addtrust
+    dp.message.register(add_copy_account, Command("addcopy"))
+    dp.message.register(copy_trade_listener_wrapper, Command("copytrade_live"))
 
     init_db()
     asyncio.create_task(copy_trading_loop())

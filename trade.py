@@ -1,9 +1,10 @@
 import time
+import sqlite3
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram import types, Dispatcher
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from utils import load_keypair
+from utils import load_keypair, list_copy_wallets, fetch_copy_trades
 from stellar_sdk import Asset, Payment, ChangeTrust, TextMemo, PathPaymentStrictSend
 from stellar_utils import build_transaction, server, TESTNET
 
@@ -180,3 +181,31 @@ async def test_signal_command(message: types.Message, db_pool):
         "timestamp": "2025-02-22T10:00:00Z"
     }
     await process_api_signal(message, mock_signal, db_pool)
+
+async def add_copy_account(message: types.Message):
+    args = message.text.split()
+    if len(args) < 2 or not args[1].startswith("G"):
+        await message.reply("Usage: /addcopy <stellar_address>")
+        return
+    wallet_address = args[1]
+    conn = sqlite3.connect("copy_trading.db")
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO copy_trading (wallet_address) VALUES (?)", (wallet_address,))
+        conn.commit()
+        await message.reply(f"Added copy trade account: {wallet_address}")
+    except sqlite3.IntegrityError:
+        await message.reply("Account already added.")
+    conn.close()
+
+async def copy_trade_listener(message: types.Message, db_pool):
+    wallets = list_copy_wallets()
+    if not wallets:
+        await message.reply("No copy trade accounts added.")
+        return
+    wallet = wallets[0]  # Use first account for now
+    trade = await fetch_copy_trades(wallet)
+    if not trade:
+        await message.reply(f"No recent trades found for {wallet}.")
+        return
+    await process_api_signal(message, trade, db_pool)

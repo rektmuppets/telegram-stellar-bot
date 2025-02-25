@@ -1,5 +1,8 @@
 import sqlite3
 import random
+from stellar_sdk import Server
+
+server = Server("https://horizon-testnet.stellar.org")
 
 def init_db():
     conn = sqlite3.connect("copy_trading.db")
@@ -33,3 +36,19 @@ async def load_keypair(telegram_id, db_pool):
         keypair = Keypair.from_secret(secret)
         print(f"Keypair type: {type(keypair)}, public_key: {keypair.public_key}")  # Debug: Should be Keypair object
         return keypair
+
+async def fetch_copy_trades(wallet_address):
+    trades = server.trades().for_account(wallet_address).order(desc=True).limit(1).call()
+    if not trades["_embedded"]["records"]:
+        return None
+    trade = trades["_embedded"]["records"][0]
+    # Assume base is XLM, counter is USDC (adjust for your pair)
+    return {
+        "signal_id": trade["id"],
+        "action": "trade",
+        "asset": {"code": trade["counter_asset_code"], "issuer": trade["counter_asset_issuer"]},
+        "amount": trade["counter_amount"],
+        "destination": "GDX2MUF37CFLY7QWBTBKIZZSRYGQOAWQYSG4ACKN7X5FV7HSATXCNGBY",  # Your account
+        "memo": "CopyTrade",
+        "timestamp": trade["ledger_close_time"]
+    }    
