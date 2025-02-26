@@ -5,7 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram import types, Dispatcher
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from utils import load_keypair, list_copy_wallets, fetch_copy_trades
-from stellar_sdk import Asset, Payment, ChangeTrust, TextMemo, PathPaymentStrictSend
+from stellar_sdk import Asset, Payment, ChangeTrust, TextMemo, PathPaymentStrictSend, PathPaymentStrictReceive
 from stellar_utils import build_transaction, server, TESTNET
 
 class TradeStates(StatesGroup):
@@ -13,6 +13,29 @@ class TradeStates(StatesGroup):
     amount = State()
     withdraw_amount = State()
     withdraw_address = State()
+    copy_wallet = State()
+
+def get_balance(account, asset):
+    """Get the balance of an asset for an account."""
+    for balance in account.raw_data["balances"]:
+        if asset.is_native() and balance["asset_type"] == "native":
+            return balance["balance"]
+        elif (balance["asset_type"] != "native" and
+              balance["asset_code"] == asset.code and
+              balance["asset_issuer"] == asset.issuer):
+            return balance["balance"]
+    return "0"
+
+def has_trustline(account, asset):
+    """Check if an account has a trustline for an asset."""
+    for balance in account.raw_data["balances"]:
+        if asset.is_native() and balance["asset_type"] == "native":
+            return True
+        elif (balance["asset_type"] != "native" and
+              balance["asset_code"] == asset.code and
+              balance["asset_issuer"] == asset.issuer):
+            return True
+    return False
 
 async def arb_command(message: types.Message, state: FSMContext):
     prices = [0.05, 0.1, 0.25, 0.5]
@@ -111,61 +134,82 @@ async def add_trustline_command(message: types.Message, db_pool):
     except Exception as e:
         await message.reply(f"Error: {str(e)}")
 
+# trade.py
 async def process_api_signal(message: types.Message, signal: dict, db_pool):
     telegram_id = message.from_user.id
     try:
         keypair = await load_keypair(telegram_id, db_pool)
         account = server.load_account(keypair.public_key)
-        print(f"Loaded account sequence: {account.sequence}")
-        
-        print(f"Signal received: {signal}")
-        asset_code = signal["asset"]["code"]
-        asset_issuer = signal["asset"]["issuer"]
-        print(f"Asset code: {asset_code}, Issuer: {asset_issuer}")
-        
-        amount = signal["amount"]
-        memo = signal.get("memo")
-        action = signal.get("action")
-        
-        trade_asset = Asset(code=asset_code, issuer=asset_issuer)
+
+        operation_type = signal["operation_type"]
+        send_asset_dict = signal["send_asset"]
+        dest_asset_dict = signal["dest_asset"]
+        path = signal["path"]
+        orig_send_amount = float(signal["send_amount"])
+        orig_dest_amount = float(signal["dest_amount"])
+
+        send_asset = (Asset.native() if send_asset_dict["code"] == "XLM"
+                      else Asset(send_asset_dict["code"], send_asset_dict["issuer"]))
+        dest_asset = (Asset.native() if dest_asset_dict["code"] == "XLM"
+                      else Asset(dest_asset_dict["code"], dest_asset_dict["issuer"]))
+        path_assets = [Asset.native() if p["code"] == "XLM"
+                       else Asset(p["code"], p["issuer"]) for p in path]
+
         operations = []
-        if action in ("trade", "trust_only"):
-            operations.append(ChangeTrust(asset=trade_asset, limit="1000.0"))
-        if action == "trade":
-            send_amount = "101"
-            paths = server.strict_send_paths(
-                source_asset=Asset.native(),
-                source_amount=send_amount,
-                destination=[trade_asset]
-            ).call()
-            print(f"Available paths: {paths}")
-            if not paths["_embedded"]["records"]:
-                await message.reply("No SDEX path available for XLM -> USDC.")
+        for asset in [send_asset, dest_asset] + path_assets:
+            if not asset.is_native() and not has_trustline(account, asset):
+                operations.append(ChangeTrust(asset=asset, limit="1000.0"))
+
+        multiplier = 0.1
+        slippage = 0.01
+        effective_rate = orig_dest_amount / orig_send_amount
+
+        if operation_type == "path_payment_strict_send":
+            user_send_amount = str(orig_send_amount * multiplier)
+            user_dest_min = "{:.7f}".format(float(user_send_amount) * effective_rate * (1 - slippage))
+            send_balance = float(get_balance(account, send_asset))
+            if send_balance < float(user_send_amount):
+                await message.reply(f"Insufficient {send_asset.code} balance: {send_balance} < {user_send_amount}")
                 return
-            
             operations.append(
                 PathPaymentStrictSend(
-                    send_asset=Asset.native(),
-                    send_amount=send_amount,
-                    destination=account.account.account_id,
-                    dest_asset=trade_asset,
-                    dest_min=amount,
-                    path=[Asset.native(), trade_asset]
+                    send_asset=send_asset,
+                    send_amount=user_send_amount,
+                    destination=keypair.public_key,
+                    dest_asset=dest_asset,
+                    dest_min=user_dest_min,
+                    path=path_assets
                 )
             )
-        
-        if not operations:
-            await message.reply(f"Unknown action: {action}")
+        elif operation_type == "path_payment_strict_receive":
+            user_dest_amount = str(orig_dest_amount * multiplier)
+            user_send_max = "{:.7f}".format(float(user_dest_amount) / effective_rate * (1 + slippage))
+            send_balance = float(get_balance(account, send_asset))
+            if send_balance < float(user_send_max):
+                await message.reply(f"Warning: {send_asset.code} balance {send_balance} < calculated send_max {user_send_max}")
+            operations.append(
+                PathPaymentStrictReceive(
+                    send_asset=send_asset,
+                    send_max=user_send_max,
+                    destination=keypair.public_key,
+                    dest_asset=dest_asset,
+                    dest_amount=user_dest_amount,
+                    path=path_assets
+                )
+            )
+        else:
+            await message.reply(f"Unsupported operation type: {operation_type}")
             return
-        
-        tx = await build_transaction(account, keypair, operations, memo=memo)  # Pass memo to builder
-        print(f"Transaction XDR before submit: {tx.to_xdr()}")
-        
+
+        tx = await build_transaction(account, keypair, operations)
         response = server.submit_transaction(tx)
-        print(f"Transaction submitted: {response}")
-        await message.reply(f"Processed signal {signal['signal_id']}: {action} {amount} {asset_code} to self. Tx: {response['hash']}")
+        await message.reply(
+            f"Copied {operation_type}: {user_send_amount if operation_type == 'path_payment_strict_send' else user_send_max} "
+            f"{send_asset.code} → {user_dest_amount if operation_type == 'path_payment_strict_receive' else user_dest_min} "
+            f"{dest_asset.code}. Tx: {response['hash']}"
+        )
     except Exception as e:
-        await message.reply(f"Signal processing failed: {str(e)}")
+        await message.reply(f"Copy trade failed: {str(e)}")
 
 async def test_signal_command(message: types.Message, db_pool):
     mock_signal = {
@@ -203,9 +247,9 @@ async def copy_trade_listener(message: types.Message, db_pool):
     if not wallets:
         await message.reply("No copy trade accounts added.")
         return
-    wallet = wallets[0]  # Use first account for now
+    wallet = wallets[-1]
     trade = await fetch_copy_trades(wallet)
     if not trade:
-        await message.reply(f"No recent trades found for {wallet}.")
+        await message.reply(f"No recent trades found for {wallet} or parsing failed. Check logs.")
         return
     await process_api_signal(message, trade, db_pool)

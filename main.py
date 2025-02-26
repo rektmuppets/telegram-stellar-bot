@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
@@ -9,8 +10,12 @@ import json
 import asyncpg
 from dotenv import load_dotenv
 
-from trade import TradeStates, arb_command, process_price, process_withdraw_amount, process_withdraw_address, withdraw_command, process_copy_trade, test_signal_command, add_trustline_command, add_copy_account, copy_trade_listener
-from utils import init_db, load_keypair, list_copy_wallets, get_x_sentiment
+from trade import (TradeStates, arb_command, process_price, process_withdraw_amount, 
+                  process_withdraw_address, withdraw_command, process_copy_trade, 
+                  test_signal_command, add_trustline_command, add_copy_account, 
+                  copy_trade_listener, process_api_signal, get_balance, has_trustline)
+from utils import (init_db, load_keypair, list_copy_wallets, get_x_sentiment, 
+                  fetch_copy_trades, parse_asset)
 
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -107,13 +112,63 @@ async def test_signal_wrapper(message: types.Message):
     global db_pool
     await test_signal_command(message, db_pool)
 
-async def add_trustline_wrapper(message: types.Message):  # New wrapper
+async def add_trustline_wrapper(message: types.Message):
     global db_pool
     await add_trustline_command(message, db_pool)
 
 async def copy_trade_listener_wrapper(message: types.Message):
     global db_pool
     await copy_trade_listener(message, db_pool)
+
+async def fetch_trades_wrapper(message: types.Message):
+    global db_pool
+    wallets = list_copy_wallets()
+    if not wallets:
+        await message.reply("No wallets to fetch trades from.")
+        return
+    wallet = wallets[0]
+    trade = await fetch_copy_trades(wallet)
+    if trade:
+        await message.reply(f"Fetched trade: {trade}")
+    else:
+        await message.reply(f"No recent trades for {wallet}")
+
+async def set_copy_wallet_command(message: types.Message, state: FSMContext):
+    await message.reply("Enter the Stellar address to copy trades from:")
+    await state.set_state(TradeStates.copy_wallet)
+
+async def process_copy_wallet(message: types.Message, state: FSMContext):
+    wallet_address = message.text
+    if not wallet_address.startswith("G"):
+        await message.reply("Invalid Stellar address. Try again or /cancel.")
+        return
+    conn = sqlite3.connect("copy_trading.db")
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO copy_trading (wallet_address) VALUES (?)", (wallet_address,))
+        conn.commit()
+        await message.reply(f"Set to copy trades from: {wallet_address}")
+    except sqlite3.IntegrityError:
+        await message.reply("Wallet already added.")
+    finally:
+        conn.close()
+    await state.clear()
+
+async def remove_copy_account(message: types.Message):
+    args = message.text.split()
+    if len(args) < 2 or not args[1].startswith("G"):
+        await message.reply("Usage: /removecopy <stellar_address>")
+        return
+    wallet_address = args[1]
+    conn = sqlite3.connect("copy_trading.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM copy_trading WHERE wallet_address = ?", (wallet_address,))
+    if c.rowcount > 0:
+        conn.commit()
+        await message.reply(f"Removed copy trade account: {wallet_address}")
+    else:
+        await message.reply(f"Wallet {wallet_address} not found in copy list.")
+    conn.close()
 
 async def copy_trading_loop():
     while True:
@@ -124,13 +179,6 @@ async def copy_trading_loop():
         except Exception as e:
             print(f"Error in copy_trading_loop: {e}")
         await asyncio.sleep(300)
-
-async def signal_listener(dp):
-    while True:
-        telegram_id = 5014800072  # Replace with your Telegram ID
-        # result, tx_hash = await mock_signal_test(telegram_id, db_pool)
-        # print(result, tx_hash)
-        await asyncio.sleep(60)
 
 async def main():
     await init_db_pool()
@@ -149,13 +197,16 @@ async def main():
     dp.message.register(withdraw_address_wrapper, TradeStates.withdraw_address)
     dp.message.register(copy_trade_command, Command("copytrade"))
     dp.message.register(test_signal_wrapper, Command("testsignal"))
-    dp.message.register(add_trustline_wrapper, Command("addtrust"))  # Register addtrust
+    dp.message.register(add_trustline_wrapper, Command("addtrust"))
     dp.message.register(add_copy_account, Command("addcopy"))
     dp.message.register(copy_trade_listener_wrapper, Command("copytrade_live"))
+    dp.message.register(fetch_trades_wrapper, Command("fetchtrades"))
+    dp.message.register(set_copy_wallet_command, Command("setcopywallet"))
+    dp.message.register(process_copy_wallet, TradeStates.copy_wallet)
+    dp.message.register(remove_copy_account, Command("removecopy"))
 
     init_db()
     asyncio.create_task(copy_trading_loop())
-    # asyncio.create_task(signal_listener(dp))
     print("Bot starting...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
