@@ -27,7 +27,6 @@ def get_balance(account, asset):
     return "0"
 
 def has_trustline(account, asset):
-    """Check if an account has a trustline for an asset."""
     for balance in account.raw_data["balances"]:
         if asset.is_native() and balance["asset_type"] == "native":
             return True
@@ -135,11 +134,20 @@ async def add_trustline_command(message: types.Message, db_pool):
         await message.reply(f"Error: {str(e)}")
 
 # trade.py
-async def process_api_signal(message: types.Message, signal: dict, db_pool):
-    telegram_id = message.from_user.id
+async def process_api_signal(message: types.Message | None, signal: dict, db_pool, telegram_id: int = None, dp=None):
+    telegram_id = message.from_user.id if message else telegram_id
+    if not telegram_id:
+        raise ValueError("No valid telegram_id provided for streaming")
     try:
         keypair = await load_keypair(telegram_id, db_pool)
         account = server.load_account(keypair.public_key)
+
+        # Replace multiplier definition with FSM logic
+        multiplier = 0.1  # Default
+        if dp:
+            state = FSMContext(storage=dp.storage, key=telegram_id)
+            data = await state.get_data()
+            multiplier = data.get("multiplier", 0.1)
 
         operation_type = signal["operation_type"]
         send_asset_dict = signal["send_asset"]
@@ -157,19 +165,27 @@ async def process_api_signal(message: types.Message, signal: dict, db_pool):
 
         operations = []
         for asset in [send_asset, dest_asset] + path_assets:
-            if not asset.is_native() and not has_trustline(account, asset):
-                operations.append(ChangeTrust(asset=asset, limit="1000.0"))
+            if not asset.is_native():
+                print(f"Checking trustline for {asset.code} ({asset.issuer})")
+                if not has_trustline(account, asset):
+                    print(f"Adding trustline for {asset.code}")
+                    operations.append(ChangeTrust(asset=asset, limit=None))
 
-        multiplier = 0.1
         slippage = 0.01
         effective_rate = orig_dest_amount / orig_send_amount
 
+        user_send_amount = None
+        user_dest_min = None
         if operation_type == "path_payment_strict_send":
             user_send_amount = str(orig_send_amount * multiplier)
             user_dest_min = "{:.7f}".format(float(user_send_amount) * effective_rate * (1 - slippage))
             send_balance = float(get_balance(account, send_asset))
             if send_balance < float(user_send_amount):
-                await message.reply(f"Insufficient {send_asset.code} balance: {send_balance} < {user_send_amount}")
+                error_msg = f"Insufficient {send_asset.code} balance: {send_balance} < {user_send_amount}"
+                if message:
+                    await message.reply(error_msg)
+                else:
+                    print(error_msg)
                 return
             operations.append(
                 PathPaymentStrictSend(
@@ -202,14 +218,30 @@ async def process_api_signal(message: types.Message, signal: dict, db_pool):
             return
 
         tx = await build_transaction(account, keypair, operations)
+        print(f"Transaction XDR before submit: {tx.to_xdr()}")
         response = server.submit_transaction(tx)
-        await message.reply(
-            f"Copied {operation_type}: {user_send_amount if operation_type == 'path_payment_strict_send' else user_send_max} "
-            f"{send_asset.code} → {user_dest_amount if operation_type == 'path_payment_strict_receive' else user_dest_min} "
-            f"{dest_asset.code}. Tx: {response['hash']}"
-        )
+        success_msg = (f"Copied {operation_type}: {user_send_amount if operation_type == 'path_payment_strict_send' else user_send_max} "
+                       f"{send_asset.code} → {user_dest_amount if operation_type == 'path_payment_strict_receive' else user_dest_min} "
+                       f"{dest_asset.code}. Tx: {response['hash']}")
+        if message:
+            await message.reply(success_msg)
+        else:
+            print(success_msg)
+        return {
+            "response": response,
+            "user_send_amount": user_send_amount,
+            "user_dest_min": user_dest_min,
+            "send_asset_code": send_asset.code,
+            "dest_asset_code": dest_asset.code,
+            "path": signal["path"]
+        }
     except Exception as e:
-        await message.reply(f"Copy trade failed: {str(e)}")
+        error_msg = f"Copy trade failed: {str(e)}"
+        if message:
+            await message.reply(error_msg)
+        else:
+            print(error_msg)
+        raise
 
 async def test_signal_command(message: types.Message, db_pool):
     mock_signal = {

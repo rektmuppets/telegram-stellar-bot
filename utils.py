@@ -1,5 +1,6 @@
 import sqlite3
 import random
+import asyncio
 from stellar_sdk import Server, Asset
 
 server = Server("https://horizon-testnet.stellar.org")
@@ -133,3 +134,25 @@ async def fetch_copy_trades(wallet_address):
             return trade
     print(f"No recent path payment trades found for {wallet_address}")
     return None
+
+# In utils.py
+async def async_stream_transactions(wallet):
+    """Wrap stellar-sdk's synchronous stream in an async iterator."""
+    server = Server("https://horizon-testnet.stellar.org")
+    stream = server.transactions().for_account(wallet).cursor("now").stream()
+
+    async def generator():
+        loop = asyncio.get_event_loop()
+        while True:
+            try:
+                # Run synchronous next() in a thread
+                tx = await loop.run_in_executor(None, next, stream)
+                yield tx
+            except StopIteration:
+                break
+            except Exception as e:
+                print(f"Stream iteration error: {e}")
+                await asyncio.sleep(5)  # Reconnect delay
+                break
+
+    return generator()
