@@ -1,9 +1,12 @@
+import time
 import sqlite3
 import random
 import asyncio
+import requests
 from stellar_sdk import Server, Asset
 
 server = Server("https://horizon-testnet.stellar.org")
+shutdown_flag = asyncio.Event()
 
 def init_db():
     conn = sqlite3.connect("copy_trading.db")
@@ -32,11 +35,21 @@ def parse_asset(asset_data):
         if asset_data == "native":
             return Asset.native()
         parts = asset_data.split(":")
-        if len(parts) == 2:  # Format: "USDC:GBBD47..."
+        if len(parts) == 2:
             return Asset(parts[0], parts[1])
         elif len(parts) == 3 and parts[0] in ["credit_alphanum4", "credit_alphanum12"]:
             return Asset(parts[1], parts[2])
     return None
+
+def get_trustline_limit(account, asset):
+    """Get the current trustline limit for an asset in an account."""
+    for balance in account.raw_data["balances"]:
+        if (not asset.is_native() and
+            balance["asset_type"] != "native" and
+            balance["asset_code"] == asset.code and
+            balance["asset_issuer"] == asset.issuer):
+            return float(balance.get("limit", 0))  # 0 if no limit (unlimited, rare)
+    return 0  # No trustline exists
 
 async def get_x_sentiment(asset_code):
     return random.uniform(-1, 1)
@@ -51,9 +64,9 @@ async def load_keypair(telegram_id, db_pool):
         encrypted_secret = bytes.fromhex(user_data["encrypted_secret"])
         cipher = Fernet(user_data["encryption_key"].encode())
         secret = cipher.decrypt(encrypted_secret).decode()
-        print(f"Decrypted secret: {secret}")  # Debug: Should be SB...remove this its security risk
+        print(f"Decrypted secret: {secret}")  # Debug: Remove in production
         keypair = Keypair.from_secret(secret)
-        print(f"Keypair type: {type(keypair)}, public_key: {keypair.public_key}")  # Debug: Should be Keypair object
+        print(f"Keypair type: {type(keypair)}, public_key: {keypair.public_key}")
         return keypair
 
 async def fetch_copy_trades(wallet_address):
@@ -72,9 +85,8 @@ async def fetch_copy_trades(wallet_address):
                 "code": op.get("source_asset_code"),
                 "issuer": op.get("source_asset_issuer")
             })
-            # Use asset_type, asset_code, asset_issuer for dest_asset
             dest_asset = parse_asset({
-                "type": op.get("asset_type", "native"),  # Changed from destination_asset_type
+                "type": op.get("asset_type", "native"),
                 "code": op.get("asset_code"),
                 "issuer": op.get("asset_issuer")
             })
@@ -135,24 +147,64 @@ async def fetch_copy_trades(wallet_address):
     print(f"No recent path payment trades found for {wallet_address}")
     return None
 
-# In utils.py
 async def async_stream_transactions(wallet):
-    """Wrap stellar-sdk's synchronous stream in an async iterator."""
-    server = Server("https://horizon-testnet.stellar.org")
-    stream = server.transactions().for_account(wallet).cursor("now").stream()
-
-    async def generator():
+    """Stream transactions asynchronously with persistent connection."""
+    async def stream_generator():
         loop = asyncio.get_event_loop()
-        while True:
+        retry_delay_min = 5
+        retry_delay_max = 15
+        max_retries = 10
+        retries = 0
+        
+        while not shutdown_flag.is_set():
+            stream = None
             try:
-                # Run synchronous next() in a thread
-                tx = await loop.run_in_executor(None, next, stream)
-                yield tx
-            except StopIteration:
-                break
+                stream = server.transactions().for_account(wallet).cursor("now").stream()
+                print(f"Started streaming for {wallet}")
+                
+                while not shutdown_flag.is_set():
+                    try:
+                        tx = await asyncio.wait_for(
+                            loop.run_in_executor(None, next, stream),
+                            timeout=60
+                        )
+                        retries = 0
+                        yield tx
+                    except (asyncio.TimeoutError, requests.exceptions.ConnectionError) as e:
+                        retries += 1
+                        delay = random.uniform(retry_delay_min, retry_delay_max)
+                        print(f"Stream timeout or connection error for {wallet}: {str(e)}, retrying in {delay:.1f} seconds (retry {retries}/{max_retries})...")
+                        if retries > max_retries:
+                            print(f"Max retries exceeded for {wallet}, stopping stream.")
+                            return
+                        await asyncio.sleep(delay)
+                        break  # Reconnect
+                    except StopIteration:
+                        print(f"Stream stopped for {wallet}, reconnecting...")
+                        break
+                    except Exception as e:
+                        retries += 1
+                        delay = random.uniform(retry_delay_min, retry_delay_max)
+                        print(f"Unexpected stream error for {wallet}: {str(e)}, retrying in {delay:.1f} seconds (retry {retries}/{max_retries})...")
+                        if retries > max_retries:
+                            print(f"Max retries exceeded for {wallet}, stopping stream.")
+                            return
+                        await asyncio.sleep(delay)
+                        break
             except Exception as e:
-                print(f"Stream iteration error: {e}")
-                await asyncio.sleep(5)  # Reconnect delay
-                break
+                retries += 1
+                delay = random.uniform(retry_delay_min, retry_delay_max)
+                print(f"Stream setup error for {wallet}: {str(e)}, retrying in {delay:.1f} seconds (retry {retries}/{max_retries})...")
+                if retries > max_retries:
+                    print(f"Max retries exceeded for {wallet}, stopping stream.")
+                    return
+                await asyncio.sleep(delay)
+            finally:
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except:
+                        pass  # Ignore close errors
+        print(f"Stream ended for wallet {wallet}")
 
-    return generator()
+    return stream_generator()

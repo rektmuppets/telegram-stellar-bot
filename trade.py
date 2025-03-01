@@ -2,7 +2,8 @@ import time
 import sqlite3
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from aiogram import types, Dispatcher
+from aiogram.fsm.storage.base import StorageKey  # Add import
+from aiogram import types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from utils import load_keypair, list_copy_wallets, fetch_copy_trades
 from stellar_sdk import Asset, Payment, ChangeTrust, TextMemo, PathPaymentStrictSend, PathPaymentStrictReceive
@@ -112,7 +113,7 @@ async def process_copy_trade(message: types.Message, asset_code: str, asset_issu
             )
         ]
         
-        tx = await build_transaction(account, keypair, operations)  # No memo for consistency
+        tx = await build_transaction(account, keypair, operations)
         response = server.submit_transaction(tx)
         await message.reply(f"Copied trade: Trusted {asset_code} and swapped {amount} {asset_code} to self. Tx: {response['hash']}")
     except Exception as e:
@@ -133,8 +134,7 @@ async def add_trustline_command(message: types.Message, db_pool):
     except Exception as e:
         await message.reply(f"Error: {str(e)}")
 
-# trade.py
-async def process_api_signal(message: types.Message | None, signal: dict, db_pool, telegram_id: int = None, dp=None):
+async def process_api_signal(message: types.Message | None, signal: dict, db_pool, telegram_id: int = None, dp=None, chat_id: int = None, bot=None):
     telegram_id = message.from_user.id if message else telegram_id
     if not telegram_id:
         raise ValueError("No valid telegram_id provided for streaming")
@@ -142,12 +142,15 @@ async def process_api_signal(message: types.Message | None, signal: dict, db_poo
         keypair = await load_keypair(telegram_id, db_pool)
         account = server.load_account(keypair.public_key)
 
-        # Replace multiplier definition with FSM logic
+        # Use StorageKey with bot.id if bot is provided
+        chat_id = message.chat.id if message else (chat_id if chat_id else telegram_id)
+        state_key = StorageKey(chat_id=chat_id, user_id=telegram_id, bot_id=bot.id) if dp and bot else None
+        state = FSMContext(dp.storage, state_key) if state_key else None
         multiplier = 0.1  # Default
-        if dp:
-            state = FSMContext(storage=dp.storage, key=telegram_id)
+        if state:
             data = await state.get_data()
             multiplier = data.get("multiplier", 0.1)
+        print(f"Applied multiplier: {multiplier} for telegram_id: {telegram_id}, chat_id: {chat_id}, state: {await state.get_data() if state else 'None'}")
 
         operation_type = signal["operation_type"]
         send_asset_dict = signal["send_asset"]
@@ -164,6 +167,7 @@ async def process_api_signal(message: types.Message | None, signal: dict, db_poo
                        else Asset(p["code"], p["issuer"]) for p in path]
 
         operations = []
+        max_limit = "1000000000.0"  # 1 billion XLM
         for asset in [send_asset, dest_asset] + path_assets:
             if not asset.is_native():
                 print(f"Checking trustline for {asset.code} ({asset.issuer})")
@@ -171,7 +175,7 @@ async def process_api_signal(message: types.Message | None, signal: dict, db_poo
                     print(f"Adding trustline for {asset.code}")
                     operations.append(ChangeTrust(asset=asset, limit=None))
 
-        slippage = 0.01
+        slippage = 0.05
         effective_rate = orig_dest_amount / orig_send_amount
 
         user_send_amount = None
@@ -242,6 +246,8 @@ async def process_api_signal(message: types.Message | None, signal: dict, db_poo
         else:
             print(error_msg)
         raise
+
+# ... (rest of trade.py unchanged: test_signal_command, add_copy_account, copy_trade_listener)
 
 async def test_signal_command(message: types.Message, db_pool):
     mock_signal = {
