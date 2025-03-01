@@ -315,3 +315,6 @@ async def main():
         await dp.storage.close()
         await bot.session.close()
         print("Final cleanup complete.")
+
+if __name__ == "__main__":
+    asyncio.run(main())        
