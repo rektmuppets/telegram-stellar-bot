@@ -1,48 +1,46 @@
 import asyncio
 import sqlite3
-from aiogram import Bot, Dispatcher, types
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram import types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-import os
 import socket
 import json
 import asyncpg
-from dotenv import load_dotenv
-
+from stellar_sdk import Server
+from globals import streaming_tasks, bot, dp  # No db_pool import
 from trade import (TradeStates, arb_command, process_price, process_withdraw_amount, 
                   process_withdraw_address, withdraw_command, process_copy_trade, 
                   test_signal_command, add_trustline_command, add_copy_account, 
-                  copy_trade_listener, process_api_signal, get_balance, has_trustline)
+                  copy_trade_listener, copy_trade_menu_command, process_set_fixed_amount,
+                  process_copy_trade_callback, process_set_multiplier, 
+                  process_set_slippage, set_slippage_command, process_copy_wallet)
 from utils import (init_db, load_keypair, list_copy_wallets, get_x_sentiment, 
-                  fetch_copy_trades, parse_asset, async_stream_transactions, shutdown_flag)
-from stellar_sdk import Server
+                  fetch_copy_trades, parse_asset, async_stream_transactions, shutdown_flag,
+                  copy_trading_stream, process_api_signal)
 
-streaming_tasks = {}
-
-load_dotenv()
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-
-if not TELEGRAM_TOKEN or not isinstance(TELEGRAM_TOKEN, str):
-    raise ValueError("TELEGRAM_TOKEN not found in .env or invalid.")
-
-bot = Bot(token=TELEGRAM_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
-db_pool = None
 server = Server("https://horizon-testnet.stellar.org")
 
 async def init_db_pool():
-    global db_pool
     try:
         db_pool = await asyncpg.create_pool(
             user='postgres',
             password='password',
             database='stellar_bot',
-            host='localhost',
+            host='127.0.0.1',
             port=5432
         )
         print("Database pool initialized successfully")
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    telegram_id BIGINT PRIMARY KEY,
+                    public_key TEXT NOT NULL,
+                    encrypted_secret TEXT NOT NULL,
+                    encryption_key TEXT NOT NULL
+                )
+            """)
+            print("Users table ensured")
+        return db_pool
     except Exception as e:
         print(f"Failed to initialize database pool: {e}")
         raise
@@ -128,8 +126,9 @@ async def copy_trade_listener_wrapper(message: types.Message):
 
 async def fetch_trades_wrapper(message: types.Message):
     global db_pool
+    telegram_id = message.from_user.id
     print("Received /fetchtrades command")
-    wallets = list_copy_wallets()
+    wallets = list_copy_wallets(telegram_id)
     print(f"Wallets from fetch_trades: {wallets}")
     if not wallets:
         await message.reply("No wallets to fetch trades from.")
@@ -141,92 +140,28 @@ async def fetch_trades_wrapper(message: types.Message):
     else:
         await message.reply(f"No recent trades for {wallet}")
 
-async def set_copy_wallet_command(message: types.Message, state: FSMContext):
-    await message.reply("Enter the Stellar address to copy trades from:")
-    await state.set_state(TradeStates.copy_wallet)
-
-async def process_copy_wallet(message: types.Message, state: FSMContext):
-    wallet_address = message.text
-    if not wallet_address.startswith("G"):
-        await message.reply("Invalid Stellar address. Try again or /cancel.")
-        return
-    conn = sqlite3.connect("copy_trading.db")
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO copy_trading (wallet_address) VALUES (?)", (wallet_address,))
-        conn.commit()
-        await message.reply(f"Set to copy trades from: {wallet_address}")
-    except sqlite3.IntegrityError:
-        await message.reply("Wallet already added.")
-    finally:
-        conn.close()
-    await state.clear()
-
 async def remove_copy_account(message: types.Message):
     args = message.text.split()
     if len(args) < 2 or not args[1].startswith("G"):
         await message.reply("Usage: /removecopy <stellar_address>")
         return
     wallet_address = args[1]
+    telegram_id = message.from_user.id
     conn = sqlite3.connect("copy_trading.db")
     c = conn.cursor()
-    c.execute("DELETE FROM copy_trading WHERE wallet_address = ?", (wallet_address,))
+    c.execute("DELETE FROM copy_trading WHERE user_id = ? AND wallet_address = ?", (telegram_id, wallet_address))
     if c.rowcount > 0:
         conn.commit()
         await message.reply(f"Removed copy trade account: {wallet_address}")
     else:
-        await message.reply(f"Wallet {wallet_address} not found in copy list.")
+        await message.reply(f"Wallet {wallet_address} not found in your copy list.")
     conn.close()
-
-async def copy_trading_stream(chat_id: int, telegram_id: int, dp: Dispatcher):
-    print(f"Starting streaming task for chat_id: {chat_id}, telegram_id: {telegram_id}")
-    while not shutdown_flag.is_set():
-        try:
-            wallets = list_copy_wallets()
-            if not wallets:
-                print("No wallets found to stream trades from.")
-                await bot.send_message(chat_id, "No wallets to stream trades from.")
-                await asyncio.sleep(60)
-                continue
-            wallet = wallets[-1]
-            print(f"Streaming trades for {wallet}")
-            stream_iter = await async_stream_transactions(wallet)
-            async for tx in stream_iter:
-                if shutdown_flag.is_set():
-                    print("Shutdown flag set, exiting streaming loop.")
-                    break
-                print(f"New transaction: {tx['id']}")
-                trade = await fetch_copy_trades(wallet)
-                if trade and trade["signal_id"] == tx["id"]:
-                    await process_api_signal_with_chat(chat_id, telegram_id, trade, dp)
-                else:
-                    print(f"No trade parsed or signal_id mismatch for tx: {tx['id']}")
-        except Exception as e:
-            print(f"Stream error: {e}, reconnecting in 5 seconds...")
-            await asyncio.sleep(5)
-    print("Streaming task ended.")
-
-async def process_api_signal_with_chat(chat_id: int, telegram_id: int, signal: dict, dp: Dispatcher):
-    try:
-        print(f"Processing trade signal: {signal['signal_id']}")
-        result = await process_api_signal(None, signal, db_pool, telegram_id, dp, chat_id=chat_id, bot=bot)  # Pass bot
-        trade_info = (
-            f"Copied trade {signal['signal_id']}:\n"
-            f"Sent: {result['user_send_amount']} {result['send_asset_code']}\n"
-            f"Received: {result['user_dest_min']} {result['dest_asset_code']}\n"
-            f"Path: {', '.join([p['code'] for p in result['path']]) or 'Direct'}\n"
-            f"Tx: {result['response']['hash']}"
-        )
-        await bot.send_message(chat_id, trade_info)
-    except Exception as e:
-        await bot.send_message(chat_id, f"Failed to copy trade {signal.get('signal_id', 'unknown')}: {str(e)}")
 
 async def start_streaming_command(message: types.Message):
     chat_id = message.chat.id
     telegram_id = message.from_user.id
     await message.reply("Starting trade streaming...")
-    print(f"Starting streaming command for chat_id: {chat_id}")
-    task = asyncio.create_task(copy_trading_stream(chat_id, telegram_id, dp))
+    task = asyncio.create_task(copy_trading_stream(chat_id, telegram_id, dp, bot, db_pool))
     streaming_tasks[chat_id] = task
 
 async def stop_streaming_command(message: types.Message):
@@ -254,26 +189,13 @@ async def shutdown():
     loop.stop()
     print("Shutdown complete.")
 
-async def set_multiplier_command(message: types.Message, state: FSMContext):
-    args = message.text.split()
-    if len(args) < 2:
-        await message.reply("Usage: /setmultiplier <value> (e.g., 0.5)")
-        return
-    try:
-        multiplier = float(args[1])
-        if 0 < multiplier <= 1:
-            await state.update_data(multiplier=multiplier)
-            data = await state.get_data()  # Verify state
-            print(f"Set multiplier to {multiplier} for chat_id: {message.chat.id}, user_id: {message.from_user.id}, state: {data}")
-            await message.reply(f"Multiplier set to {multiplier}")
-        else:
-            await message.reply("Multiplier must be between 0 and 1.")
-    except ValueError:
-        await message.reply("Invalid value. Use a number (e.g., 0.5).")
-
 async def main():
-    await init_db_pool()
+    db_pool = await init_db_pool()
     
+    # Define wrapper for process_copy_trade_callback
+    async def copy_trade_callback_wrapper(callback: types.CallbackQuery, state: FSMContext):
+        await process_copy_trade_callback(callback, state, db_pool)
+
     dp.message.register(register_command, Command("register"))
     dp.message.register(start_command, Command("start"))
     dp.message.register(cancel_command, Command("cancel"))
@@ -283,19 +205,23 @@ async def main():
     dp.callback_query.register(process_price, TradeStates.price)
     dp.message.register(withdraw_command, Command("withdraw"))
     dp.message.register(process_withdraw_amount, TradeStates.withdraw_amount)
-    dp.message.register(withdraw_address_wrapper, TradeStates.withdraw_address)
+    dp.message.register(lambda message, state: process_withdraw_address(message, state, db_pool), TradeStates.withdraw_address)
     dp.message.register(copy_trade_command, Command("copytrade"))
     dp.message.register(test_signal_wrapper, Command("testsignal"))
     dp.message.register(add_trustline_wrapper, Command("addtrust"))
     dp.message.register(add_copy_account, Command("addcopy"))
     dp.message.register(copy_trade_listener_wrapper, Command("copytrade_live"))
     dp.message.register(fetch_trades_wrapper, Command("fetchtrades"))
-    dp.message.register(set_copy_wallet_command, Command("setcopywallet"))
-    dp.message.register(process_copy_wallet, TradeStates.copy_wallet)
     dp.message.register(remove_copy_account, Command("removecopy"))
     dp.message.register(start_streaming_command, Command("startstreaming"))
     dp.message.register(stop_streaming_command, Command("stopstreaming"))
-    dp.message.register(set_multiplier_command, Command("setmultiplier"))
+    dp.message.register(copy_trade_menu_command, Command("copytrade_menu"))
+    dp.callback_query.register(copy_trade_callback_wrapper)  # Register wrapper without filters
+    dp.message.register(process_set_multiplier, TradeStates.set_multiplier)
+    dp.message.register(process_set_fixed_amount, TradeStates.set_fixed_amount)
+    dp.message.register(set_slippage_command, Command("setslippage"))
+    dp.message.register(process_set_slippage, TradeStates.set_slippage)
+    dp.message.register(process_copy_wallet, TradeStates.copy_wallet)
 
     init_db()
     print("Bot starting...")
@@ -304,17 +230,12 @@ async def main():
     print("Starting polling...")
     try:
         await dp.start_polling(bot)
-    except KeyboardInterrupt:
-        print("Received KeyboardInterrupt, shutting down...")
-        await shutdown()
-        print("Bot stopped by user.")
     except Exception as e:
-        print(f"Unexpected error: {e}, shutting down...")
+        print(f"Polling failed: {e}")
         await shutdown()
     finally:
-        await dp.storage.close()
-        await bot.session.close()
-        print("Final cleanup complete.")
+        if 'db_pool' in locals():
+            await db_pool.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())        
+    asyncio.run(main())
