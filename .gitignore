@@ -1,6 +1,7 @@
 bot.log
+copy_trade.py
 soroban-contracts/
-
+copy_trading_backup.db
 # dependencies
 /node_modules
 /.pnp
@@ -52,3 +53,7 @@ __pycache__/
 copy_trading.db
 
 venv311/
+
+pg_hba.conf
+
+backup/
